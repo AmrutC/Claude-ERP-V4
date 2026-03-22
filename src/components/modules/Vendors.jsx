@@ -39,7 +39,7 @@ const EMPTY_BILL = {
 let vendorCtr = 10, billCtr = 10;
 
 export default function Vendors() {
-  const { activeEntity, vendors, setVendors, addToast } = useAppStore();
+  const { activeEntity, projects, vendors, setVendors, addToast } = useAppStore();
   const entityVendors = (vendors||[]).filter(v=>v.entity_id===activeEntity?.id);
 
   const [tab, setTab]           = useState('vendors');
@@ -55,6 +55,54 @@ export default function Vendors() {
   const [payDate, setPayDate]         = useState(new Date().toISOString().slice(0,10));
   const [payMode, setPayMode]         = useState('NEFT');
   const [payRef, setPayRef]           = useState('');
+
+  // ── PO STATE ─────────────────────────────────────────────────────────
+  const [poModal, setPoModal]         = useState(false);
+  const [poGenerating, setPoGenerating] = useState(false);
+  const [poVendorId, setPoVendorId]   = useState('');
+  const [poProjectId, setPoProjectId] = useState('');
+  const [poDate, setPoDate]           = useState(new Date().toISOString().slice(0,10));
+  const [poGstRate, setPoGstRate]     = useState(18);
+  const [poNotes, setPoNotes]         = useState('');
+  const [poTerms, setPoTerms]         = useState('Payment within 30 days of delivery. Subject to quality inspection.');
+  const [poItems, setPoItems]         = useState([{ id:1, description:'', unit:'Nos', qty:'', rate:'' }]);
+
+  function addPoItem()  { setPoItems(is=>[...is,{ id:Date.now(), description:'', unit:'Nos', qty:'', rate:'' }]); }
+  function removePoItem(id) { setPoItems(is=>is.filter(i=>i.id!==id)); }
+  function updatePoItem(id, k, v) { setPoItems(is=>is.map(i=>i.id===id?{...i,[k]:v}:i)); }
+
+  function fyStr() {
+    const y=new Date().getFullYear(), m=new Date().getMonth();
+    const s=m>=3?y:y-1; return `${String(s).slice(2)}-${String(s+1).slice(2)}`;
+  }
+  const [poCtr, setPoCtr] = useState(1);
+
+  async function generatePO() {
+    const vendor  = entityVendors.find(v=>v.id===Number(poVendorId));
+    const project = (projects||[]).find(p=>p.id===Number(poProjectId));
+    if (!vendor) { alert('Select a vendor.'); return; }
+    if (!poItems.some(i=>i.description.trim())) { alert('Add at least one item.'); return; }
+    setPoGenerating(true);
+    try {
+      const poNumber = `${activeEntity?.code||'VG'}/${fyStr()}/PO/${String(poCtr).padStart(3,'0')}`;
+      const deliveryAddress = project
+        ? `${project.name}\n${project.village||''}, ${project.taluka||''}, ${project.district||''} - ${project.pin||''}\nMaharashtra`
+        : '';
+      const res = await window.vgERP.doc.generatePO({
+        vendor, project, items: poItems.filter(i=>i.description.trim()),
+        poNumber, poDate, deliveryAddress, notes:poNotes, terms:poTerms,
+        gstRate:poGstRate, entityName:activeEntity?.code+' — '+(activeEntity?.name||'Vision Grroup'),
+      });
+      if (res.ok) {
+        setPoCtr(c=>c+1);
+        addToast(`PO ${poNumber} generated and opened in Word.`, 'success');
+        setPoModal(false);
+      } else {
+        alert('PO generation failed: ' + res.error);
+      }
+    } catch(e) { alert('Error: '+e.message); }
+    setPoGenerating(false);
+  }
 
   const setV = k => e => setVForm(f=>({...f,[k]:e.target.value}));
   const setB = k => e => {
@@ -128,7 +176,7 @@ export default function Vendors() {
     <div>
       {/* Tabs */}
       <div style={{ display:'flex', gap:3, background:'#F3F4F6', borderRadius:10, padding:3, marginBottom:14, width:'fit-content' }}>
-        {[['vendors','Vendor Master'],['bills','Bill Register'],['pending','Pending Payment']].map(([id,label])=>(
+        {[['vendors','Vendor Master'],['bills','Bill Register'],['pending','Pending Payment'],['po','Purchase Orders']].map(([id,label])=>(
           <button key={id} onClick={()=>setTab(id)}
             style={{ padding:'6px 18px', borderRadius:7, fontSize:12.5, fontWeight:tab===id?700:500, color:tab===id?'#0D1E35':'#6B7280', background:tab===id?'#fff':'transparent', cursor:'pointer', border:tab===id?'1px solid #E5E7EB':'1px solid transparent', boxShadow:tab===id?'0 1px 2px rgba(0,0,0,0.06)':'' }}>
             {label}
@@ -406,6 +454,171 @@ export default function Vendors() {
           </div>
         )}
       </Modal>
+
+      {/* PURCHASE ORDERS TAB */}
+      {tab==='po' && (
+        <div>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+            <div style={{ fontSize:13, color:'#4B5563' }}>Generate PO for any registered vendor. Opens as a Word (.docx) file.</div>
+            <button onClick={()=>setPoModal(true)} className="btn-primary" style={{ fontSize:12.5 }}>
+              <Plus size={13}/> New Purchase Order
+            </button>
+          </div>
+          <div style={{ background:'#EAF0F8', border:'1px solid #C5D5E8', borderRadius:12, padding:'14px 18px' }}>
+            <div style={{ fontSize:12, fontWeight:700, color:'#1E3A8A', marginBottom:8 }}>How PO Generation Works</div>
+            <div style={{ fontSize:12, color:'#374151', lineHeight:1.7 }}>
+              1. Select vendor — details (name, GSTIN, PAN, phone) auto-fill from Vendor Master<br/>
+              2. Select project — shipping/delivery address auto-fills from project location<br/>
+              3. Add items with description, quantity, rate — subtotal and GST auto-calculate<br/>
+              4. Click Generate → Word file opens automatically (saved to sync folder\documents\purchase_orders\)
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PO GENERATE MODAL */}
+      {poModal && (() => {
+        const selVend = entityVendors.find(v=>v.id===Number(poVendorId));
+        const selProj = (projects||[]).filter(p=>p.entity_id===activeEntity?.id).find(p=>p.id===Number(poProjectId));
+        const subtotal = poItems.reduce((s,i)=>s+(Number(i.qty||0)*Number(i.rate||0)),0);
+        const gstAmt   = Math.round(subtotal * poGstRate / 100);
+        const grandTotal = subtotal + gstAmt;
+        const entityProjects = (projects||[]).filter(p=>p.entity_id===activeEntity?.id);
+        return (
+          <div style={{ position:'fixed', inset:0, zIndex:60, display:'flex', alignItems:'center', justifyContent:'center', padding:16 }}>
+            <div style={{ position:'absolute', inset:0, background:'rgba(0,0,0,0.45)' }} onClick={()=>setPoModal(false)}/>
+            <div style={{ position:'relative', background:'#fff', borderRadius:18, width:'100%', maxWidth:900, maxHeight:'92vh', display:'flex', flexDirection:'column', boxShadow:'0 24px 64px rgba(0,0,0,0.22)' }}>
+              <div style={{ padding:'16px 22px', borderBottom:'1px solid #E5E7EB', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <div style={{ fontSize:15, fontWeight:800, color:'#0D1E35' }}>New Purchase Order</div>
+                <button onClick={()=>setPoModal(false)} style={{ background:'#F3F4F6', border:'none', borderRadius:8, width:28, height:28, cursor:'pointer', color:'#6B7280', fontSize:16 }}>✕</button>
+              </div>
+
+              <div style={{ flex:1, overflowY:'auto', padding:'18px 22px' }}>
+                {/* Header: Vendor + Project + Date */}
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:13, marginBottom:16 }}>
+                  <div>
+                    <label style={{ display:'block', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:5 }}>Vendor <span style={{ color:'#DC2626' }}>*</span></label>
+                    <select style={sel} value={poVendorId} onChange={e=>setPoVendorId(e.target.value)}>
+                      <option value="">— Select vendor —</option>
+                      {entityVendors.filter(v=>v.status==='Active').map(v=><option key={v.id} value={v.id}>{v.name}</option>)}
+                    </select>
+                    {selVend && (
+                      <div style={{ marginTop:6, background:'#F0FDF4', border:'1px solid #86EFAC', borderRadius:8, padding:'8px 10px', fontSize:11.5 }}>
+                        <div style={{ fontWeight:700, color:'#0D1E35' }}>{selVend.name}</div>
+                        {selVend.phone && <div style={{ color:'#374151' }}>📞 {selVend.phone}</div>}
+                        {selVend.gstin && <div style={{ fontFamily:'monospace', color:'#374151' }}>GSTIN: {selVend.gstin}</div>}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label style={{ display:'block', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:5 }}>Project / Delivery Site</label>
+                    <select style={sel} value={poProjectId} onChange={e=>setPoProjectId(e.target.value)}>
+                      <option value="">— Select project —</option>
+                      {entityProjects.map(p=><option key={p.id} value={p.id}>{p.code} — {p.name}</option>)}
+                    </select>
+                    {selProj && (
+                      <div style={{ marginTop:6, background:'#EAF0F8', border:'1px solid #C5D5E8', borderRadius:8, padding:'8px 10px', fontSize:11.5 }}>
+                        <div style={{ fontWeight:700, color:'#0D1E35' }}>Delivery to: {selProj.name}</div>
+                        <div style={{ color:'#374151' }}>{selProj.village}, {selProj.taluka}, {selProj.district} — {selProj.pin}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:12 }}>
+                    <div>
+                      <label style={{ display:'block', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:5 }}>PO Date</label>
+                      <input style={inp} type="date" value={poDate} onChange={e=>setPoDate(e.target.value)}/>
+                    </div>
+                    <div>
+                      <label style={{ display:'block', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:5 }}>GST Rate (%)</label>
+                      <select style={sel} value={poGstRate} onChange={e=>setPoGstRate(Number(e.target.value))}>
+                        {[0,5,12,18,28].map(r=><option key={r} value={r}>{r}%</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Items table */}
+                <div style={{ background:'#F8FAFC', border:'1px solid #E5E7EB', borderRadius:12, overflow:'hidden', marginBottom:16 }}>
+                  <div style={{ background:'#0D1E35', padding:'9px 14px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <span style={{ fontSize:11, fontWeight:700, color:'#fff', textTransform:'uppercase', letterSpacing:'0.5px' }}>Items / Description of Work</span>
+                    <button onClick={addPoItem} style={{ background:'#C9951E', border:'none', borderRadius:6, padding:'4px 12px', cursor:'pointer', fontSize:11, fontWeight:700, color:'#0D1E35', display:'flex', alignItems:'center', gap:4 }}>
+                      <Plus size={11}/> Add Row
+                    </button>
+                  </div>
+                  <div style={{ overflowX:'auto' }}>
+                    <table style={{ width:'100%', borderCollapse:'collapse', minWidth:700 }}>
+                      <thead><tr style={{ background:'#F9FAFB', borderBottom:'2px solid #E5E7EB' }}>
+                        {['#','Description of Items / Work','Unit','Qty','Rate (₹)','Amount (₹)',''].map(h=>(
+                          <th key={h} style={{ padding:'8px 10px', textAlign:'left', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.4px', whiteSpace:'nowrap' }}>{h}</th>
+                        ))}
+                      </tr></thead>
+                      <tbody>
+                        {poItems.map((item,i)=>(
+                          <tr key={item.id} style={{ borderBottom:'1px solid #F3F4F6' }}>
+                            <td style={{ padding:'6px 10px', fontSize:12, color:'#6B7280', width:30 }}>{i+1}</td>
+                            <td style={{ padding:'5px 8px', minWidth:260 }}>
+                              <input style={{ ...inp, padding:'5px 8px', fontSize:12 }} value={item.description} onChange={e=>updatePoItem(item.id,'description',e.target.value)} placeholder="Material / work description"/>
+                            </td>
+                            <td style={{ padding:'5px 8px', width:90 }}>
+                              <select style={{ ...sel, padding:'5px 7px', fontSize:12 }} value={item.unit} onChange={e=>updatePoItem(item.id,'unit',e.target.value)}>
+                                {['Nos','Kg','MT','Bags','Sqft','Sqmt','RFt','RMt','LS','Lot'].map(u=><option key={u}>{u}</option>)}
+                              </select>
+                            </td>
+                            <td style={{ padding:'5px 8px', width:90 }}>
+                              <input style={{ ...inp, padding:'5px 8px', fontSize:12 }} type="number" value={item.qty} onChange={e=>updatePoItem(item.id,'qty',e.target.value)} placeholder="0"/>
+                            </td>
+                            <td style={{ padding:'5px 8px', width:120 }}>
+                              <input style={{ ...inp, padding:'5px 8px', fontSize:12 }} type="number" value={item.rate} onChange={e=>updatePoItem(item.id,'rate',e.target.value)} placeholder="0"/>
+                            </td>
+                            <td style={{ padding:'6px 10px', fontSize:13, fontWeight:700, fontFamily:'monospace', textAlign:'right', color:'#0D1E35' }}>
+                              {inr(Number(item.qty||0)*Number(item.rate||0))}
+                            </td>
+                            <td style={{ padding:'6px 8px' }}>
+                              {poItems.length>1 && (
+                                <button onClick={()=>removePoItem(item.id)} style={{ background:'#FEE2E2', border:'1px solid #FCA5A5', borderRadius:6, padding:'3px 7px', cursor:'pointer', color:'#7F1D1D', fontSize:11 }}>✕</button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {/* Totals */}
+                  <div style={{ background:'#0D1E35', padding:'12px 16px', display:'flex', justifyContent:'flex-end', gap:24 }}>
+                    {[['Sub Total', inr(subtotal),'#E5E7EB'],['GST @'+poGstRate+'%', inr(gstAmt),'#FEF3C7'],['Grand Total', inr(grandTotal),'#F0C040']].map(([l,v,c])=>(
+                      <div key={l} style={{ textAlign:'right' }}>
+                        <div style={{ fontSize:10, color:'rgba(255,255,255,0.5)', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:2 }}>{l}</div>
+                        <div style={{ fontSize:15, fontWeight:800, color:c, fontFamily:'monospace' }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Notes + Terms */}
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:13, marginBottom:4 }}>
+                  <div>
+                    <label style={{ display:'block', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:5 }}>Notes / Special Instructions</label>
+                    <textarea style={{ ...inp, height:70, resize:'vertical' }} value={poNotes} onChange={e=>setPoNotes(e.target.value)} placeholder="Quality standards, delivery timeline, inspection requirements…"/>
+                  </div>
+                  <div>
+                    <label style={{ display:'block', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:5 }}>Terms &amp; Conditions</label>
+                    <textarea style={{ ...inp, height:70, resize:'vertical' }} value={poTerms} onChange={e=>setPoTerms(e.target.value)}/>
+                  </div>
+                </div>
+              </div>
+
+              {/* Footer */}
+              <div style={{ padding:'14px 22px', borderTop:'1px solid #E5E7EB', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <button onClick={()=>setPoModal(false)} style={{ background:'#F3F4F6', border:'1px solid #E5E7EB', borderRadius:8, padding:'7px 18px', cursor:'pointer', fontSize:13, fontWeight:600, color:'#374151' }}>Cancel</button>
+                <button onClick={generatePO} disabled={poGenerating} style={{ background:'#0D1E35', color:'#fff', border:'none', borderRadius:8, padding:'8px 22px', cursor:'pointer', fontSize:13, fontWeight:700, display:'flex', alignItems:'center', gap:8, opacity:poGenerating?0.6:1 }}>
+                  <FileText size={14}/>
+                  {poGenerating ? 'Generating Word file…' : 'Generate PO (Word File)'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

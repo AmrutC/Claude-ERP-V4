@@ -44,7 +44,7 @@ function exportCSV(entries) {
 }
 
 export default function Accounts() {
-  const { activeEntity, projects, bookings, vendors, setVendors, ledgerEntries, setLedgerEntries, addToast } = useAppStore();
+  const { activeEntity, projects, bookings, setBookings, vendors, setVendors, ledgerEntries, setLedgerEntries, addToast } = useAppStore();
   const entityProjects = (projects||[]).filter(p=>p.entity_id===activeEntity?.id);
   const entityBookings = (bookings||[]).filter(b=>b.entity_id===activeEntity?.id && b.approval_status==='Approved');
   const entityVendors  = (vendors||[]).filter(v=>v.entity_id===activeEntity?.id);
@@ -153,18 +153,59 @@ export default function Accounts() {
     if (form.category==='Other (specify)'&&!form.custom_category.trim()) errs.custom_category = 'Enter custom category name.';
     if (Object.keys(errs).length>0) { setErrors(errs); return; }
 
-    const proj = entityProjects.find(p=>p.id===Number(form.project_id));
+    const proj    = entityProjects.find(p=>p.id===Number(form.project_id));
+    const totalAmt = Number(form.amount);
+    // GST breakdown (for sales receipt)
+    const gstRate  = Number(form.gst_rate) || 5;
+    const gstAmt   = isSalesRcpt ? Math.round(totalAmt * gstRate / (100 + gstRate)) : 0;
+    const taxable  = isSalesRcpt ? (totalAmt - gstAmt) : totalAmt;
+
     entryCtr++;
     const entry = {
       ...form, id:entryCtr, entity_id:activeEntity?.id,
-      project_name:proj?.name||'', amount:Number(form.amount),
+      project_name:proj?.name||'', amount:totalAmt,
+      // GST breakdown stored on entry
+      gst_amount: gstAmt, taxable_value: taxable,
       ref: isVendorPay?form.invoice_no : isSalesRcpt?`Unit ${form.unit_no}`:form.ref,
     };
     setLedgerEntries(es=>[entry,...(es||[])]);
 
+    // ── SALES RECEIPT SYNC — record payment on booking's next pending milestone ──
+    if (isSalesRcpt && form.booking_id) {
+      const receiptNo = `${proj?.code||'VG'}/${new Date().getFullYear().toString().slice(2)}-${(new Date().getFullYear()+1).toString().slice(2)}/REC/${String(entryCtr).padStart(3,'0')}`;
+      setBookings(bs => bs.map(bk => {
+        if (bk.id !== Number(form.booking_id)) return bk;
+        const milestones = bk.milestones || [];
+        let remaining = totalAmt;
+        const updatedMs = milestones.map(m => {
+          if (remaining <= 0 || m.status === 'Paid') return m;
+          // Find first unpaid/part-paid milestone with demand issued
+          if (['Demand Issued','Part Paid','Overdue','Pending'].includes(m.status)) {
+            const bal    = (m.total||0) - (m.paid||0);
+            const paying = Math.min(remaining, bal);
+            remaining   -= paying;
+            const newPaid = (m.paid||0) + paying;
+            const status  = newPaid >= (m.total||0) ? 'Paid' : newPaid > 0 ? 'Part Paid' : m.status;
+            const pmt     = {
+              receipt_no: receiptNo, date: form.date,
+              amount: paying, mode: form.payment_mode||'NEFT',
+              cheque_utr: form.cheque_utr||'', bank:'',
+              gst_amount: Math.round(paying * gstRate / (100+gstRate)),
+              taxable_value: paying - Math.round(paying * gstRate / (100+gstRate)),
+              payment_rows: [{ payment_type:'Part Payment', amount:String(paying), mode:form.payment_mode||'NEFT', cheque_utr:form.cheque_utr||'', bank:'' }],
+              from_ledger: true,
+            };
+            return { ...m, paid: newPaid, status, payments:[...(m.payments||[]), pmt] };
+          }
+          return m;
+        });
+        return { ...bk, milestones: updatedMs };
+      }));
+      addToast(`Sales receipt saved — ${inr(totalAmt)} (GST: ${inr(gstAmt)}) recorded against Unit ${form.unit_no}.`, 'success');
+    }
     // ── VENDOR PAYMENT SYNC — update bill paid_amount + status in Vendors store ──
-    if (isVendorPay && form.vendor_id && form.bill_id) {
-      const paid = Number(form.amount);
+    else if (isVendorPay && form.vendor_id && form.bill_id) {
+      const paid = totalAmt;
       setVendors(vs => vs.map(v => {
         if (v.id !== Number(form.vendor_id)) return v;
         return {
@@ -179,8 +220,9 @@ export default function Accounts() {
         };
       }));
       addToast(`Bill payment recorded — ${form.vendor_name}. Bill status updated.`, 'success');
-    } else {
-      addToast('Ledger entry added.', 'success');
+    }
+    else {
+      addToast('Ledger entry saved.', 'success');
     }
     setModal(false); setForm(EMPTY); setErrors({});
   }
@@ -242,7 +284,7 @@ export default function Accounts() {
           ?<div style={{ padding:60, textAlign:'center', color:'#9CA3AF', fontSize:13 }}>No entries found.</div>
           :<table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead><tr style={{ background:'#F9FAFB', borderBottom:'2px solid #E5E7EB' }}>
-              {['Date','Project','Type','Category','Description','Party','Mode','Amount','Ref/Status','Attachment'].map(h=>(
+              {['Date','Project','Type','Category','Description','Party','Mode','Taxable / Amount','GST','Total','Ref/Status','Attachment'].map(h=>(
                 <th key={h} style={{ padding:'9px 12px', textAlign:'left', fontSize:10, fontWeight:700, color:'#4B5563', textTransform:'uppercase', letterSpacing:'0.4px', whiteSpace:'nowrap' }}>{h}</th>
               ))}
             </tr></thead>
@@ -263,7 +305,13 @@ export default function Accounts() {
                     </td>
                     <td style={{ padding:'9px 12px', fontSize:12.5, color:'#111827', maxWidth:200, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.description}</td>
                     <td style={{ padding:'9px 12px', fontSize:12, color:'#374151', fontWeight:isAdv?600:400 }}>{e.party_name||e.advance_party||'—'}</td>
-                    <td style={{ padding:'9px 12px', fontSize:11.5, color:'#4B5563' }}>{e.payment_mode||'—'}</td>
+                    <td style={{ padding:'9px 12px', fontSize:12, color:'#374151' }}>{e.payment_mode||'—'}</td>
+                    <td style={{ padding:'9px 12px', fontSize:13, fontWeight:800, fontFamily:'monospace', textAlign:'right', color:e.type==='Credit'?'#14532D':'#DC2626' }}>
+                      {e.type==='Credit'?'+':'-'}{inr(e.gst_amount > 0 ? e.taxable_value : e.amount)}
+                    </td>
+                    <td style={{ padding:'9px 12px', fontSize:12, fontFamily:'monospace', textAlign:'right', color:'#78350F' }}>
+                      {e.gst_amount > 0 ? inr(e.gst_amount) : '—'}
+                    </td>
                     <td style={{ padding:'9px 12px', fontSize:13, fontWeight:800, fontFamily:'monospace', textAlign:'right', color:e.type==='Credit'?'#14532D':'#DC2626' }}>
                       {e.type==='Credit'?'+':'-'}{inr(e.amount)}
                     </td>
@@ -287,6 +335,12 @@ export default function Accounts() {
             <tfoot>
               <tr style={{ background:'#0D1E35' }}>
                 <td colSpan={7} style={{ padding:'9px 12px', fontSize:12, fontWeight:800, color:'#fff' }}>TOTALS (filtered)</td>
+                <td style={{ padding:'9px 12px', textAlign:'right', fontSize:11, fontFamily:'monospace', fontWeight:600, color:'#E5E7EB' }}>
+                  {inr(filtered.filter(e=>e.type==='Credit').reduce((s,e)=>s+(e.taxable_value||e.amount),0))}
+                </td>
+                <td style={{ padding:'9px 12px', textAlign:'right', fontSize:11, fontFamily:'monospace', fontWeight:600, color:'#FEF3C7' }}>
+                  {inr(filtered.reduce((s,e)=>s+(e.gst_amount||0),0))}
+                </td>
                 <td style={{ padding:'9px 12px', textAlign:'right', fontSize:13, fontFamily:'monospace', fontWeight:800, color:balance>=0?'#86EFAC':'#FCA5A5' }}>
                   {balance>=0?'+':''}{inr(balance)}
                 </td>
@@ -495,9 +549,55 @@ export default function Accounts() {
             <input style={errors.description?inpE:inp} value={form.description} onChange={set('description')} placeholder="What is this entry for?"/>
           </F>
 
-          <F label="Amount (₹)" required error={errors.amount}>
-            <input style={errors.amount?inpE:inp} type="number" value={form.amount} onChange={set('amount')} placeholder="0"/>
-          </F>
+          {/* Amount — with GST auto-breakdown for Sales Receipt */}
+          {isSalesRcpt && form.gst_rate ? (() => {
+            const totalAmt   = Number(form.amount) || 0;
+            const gstRate    = Number(form.gst_rate) || 5;
+            const gstAmt     = totalAmt ? Math.round(totalAmt * gstRate / (100 + gstRate)) : 0;
+            const taxable    = totalAmt - gstAmt;
+            const roundOff   = totalAmt - (taxable + gstAmt);
+            return (
+              <div style={{ gridColumn:'1/-1' }}>
+                <div style={{ background:'#F0FDF4', border:'1px solid #86EFAC', borderRadius:12, padding:'14px 16px' }}>
+                  <div style={{ fontSize:10, fontWeight:700, color:'#14532D', textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:12 }}>
+                    Sales Receipt — Enter Total Amount Received (incl. GST)
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, marginBottom:12 }}>
+                    <F label="Total Amount Received (₹) incl. GST" required error={errors.amount}>
+                      <input style={errors.amount?inpE:inp} type="number" value={form.amount}
+                        onChange={set('amount')} placeholder="e.g. 525000"/>
+                    </F>
+                    <F label="GST Rate (Auto from Booking)">
+                      <input style={{ ...inp, background:'#F9FAFB' }} value={gstRate+'%'} readOnly/>
+                    </F>
+                  </div>
+                  {totalAmt > 0 && (
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:10 }}>
+                      {[
+                        ['Taxable Value (excl. GST)', inr(taxable), '#0D1E35', '#EAF0F8'],
+                        ['GST @'+gstRate+'%',          inr(gstAmt),  '#78350F', '#FEF3C7'],
+                        ['Total Received',              inr(totalAmt),'#14532D', '#DCFCE7'],
+                      ].map(([l,v,c,bg])=>(
+                        <div key={l} style={{ background:bg, borderRadius:8, padding:'10px 12px' }}>
+                          <div style={{ fontSize:9.5, fontWeight:700, color:c, textTransform:'uppercase', letterSpacing:'0.4px', marginBottom:3 }}>{l}</div>
+                          <div style={{ fontSize:15, fontWeight:800, color:c, fontFamily:'monospace' }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {totalAmt > 0 && (
+                    <div style={{ marginTop:10, background:'#EAF0F8', borderRadius:8, padding:'8px 12px', fontSize:12, color:'#1E3A8A' }}>
+                      This GST amount ({inr(gstAmt)}) will auto-reflect in the GST Register and customer's booking ledger as "GST received against Unit {form.unit_no}".
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })() : (
+            <F label="Amount (₹)" required error={errors.amount}>
+              <input style={errors.amount?inpE:inp} type="number" value={form.amount} onChange={set('amount')} placeholder="0"/>
+            </F>
+          )}
           <F label="Reference / Voucher No.">
             <input style={inp} value={form.ref} onChange={set('ref')} placeholder="Voucher / ref no."/>
           </F>

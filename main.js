@@ -222,3 +222,204 @@ ipcMain.handle('data:loadGlobal', () => {
     return { ok: false, error: err.message };
   }
 });
+
+// ── PURCHASE ORDER — Word file generation ─────────────────────────────────
+ipcMain.handle('doc:generatePO', async (event, poData) => {
+  try {
+    // Dynamic import of docx (must be installed: npm install docx)
+    let docxLib;
+    try { docxLib = require('docx'); }
+    catch { return { ok:false, error:'docx package not installed. Run: npm install docx' }; }
+
+    const {
+      Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
+      AlignmentType, WidthType, BorderStyle, ShadingType, VerticalAlign,
+    } = docxLib;
+
+    const { vendor, project, items, poNumber, poDate, deliveryAddress, notes, terms, entityName } = poData;
+
+    const border = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
+    const borders = { top:border, bottom:border, left:border, right:border };
+    const noBorder = { style: BorderStyle.NONE };
+    const noBorders = { top:noBorder, bottom:noBorder, left:noBorder, right:noBorder };
+    const cellM = { top:100, bottom:100, left:120, right:120 };
+
+    function hdrCell(text, w, bg='1B2D4F') {
+      return new TableCell({
+        width:{size:w,type:WidthType.DXA}, borders,
+        shading:{fill:bg,type:ShadingType.CLEAR}, margins:cellM,
+        verticalAlign:VerticalAlign.CENTER,
+        children:[new Paragraph({ alignment:AlignmentType.CENTER, children:[new TextRun({text,bold:true,color:'FFFFFF',size:20,font:'Arial'})] })]
+      });
+    }
+    function dataCell(text, w, right=false, bold=false) {
+      return new TableCell({
+        width:{size:w,type:WidthType.DXA}, borders, margins:cellM,
+        children:[new Paragraph({ alignment:right?AlignmentType.RIGHT:AlignmentType.LEFT, children:[new TextRun({text:String(text||''),bold,size:20,font:'Arial'})] })]
+      });
+    }
+    function labelCell(text, w) {
+      return new TableCell({
+        width:{size:w,type:WidthType.DXA}, borders,
+        shading:{fill:'F0F4F8',type:ShadingType.CLEAR}, margins:cellM,
+        children:[new Paragraph({ children:[new TextRun({text,bold:true,size:20,font:'Arial',color:'374151'})] })]
+      });
+    }
+    function infoRow(label, value, w1=2200, w2=2700) {
+      return new TableRow({ children:[labelCell(label,w1), dataCell(value,w2)] });
+    }
+
+    // Item rows
+    const subtotal = items.reduce((s,it)=>s+(Number(it.qty||0)*Number(it.rate||0)),0);
+    const gstAmt   = Math.round(subtotal * Number(poData.gstRate||18) / 100);
+    const grandTotal = subtotal + gstAmt;
+
+    const itemRows = items.map((it,i)=>
+      new TableRow({ children:[
+        dataCell(String(i+1), 500, true),
+        dataCell(it.description||'', 3600),
+        dataCell(it.unit||'Nos', 800, true),
+        dataCell(String(it.qty||''), 700, true),
+        dataCell('₹'+Number(it.rate||0).toLocaleString('en-IN'), 1100, true),
+        dataCell('₹'+(Number(it.qty||0)*Number(it.rate||0)).toLocaleString('en-IN'), 1260, true, true),
+      ]})
+    );
+
+    const doc = new Document({
+      sections:[{
+        properties:{ page:{ size:{width:12240,height:15840}, margin:{top:900,bottom:900,left:1080,right:1080} } },
+        children:[
+          // Title
+          new Paragraph({ alignment:AlignmentType.CENTER, spacing:{after:80}, children:[
+            new TextRun({text:'PURCHASE ORDER', bold:true, size:36, font:'Arial', color:'1B2D4F'})
+          ]}),
+          new Paragraph({ alignment:AlignmentType.CENTER, spacing:{after:200}, border:{bottom:{style:BorderStyle.SINGLE,size:6,color:'C9951E',space:1}}, children:[
+            new TextRun({text:entityName||'Vision Grroup', size:22, font:'Arial', color:'6B7280'})
+          ]}),
+          new Paragraph({ spacing:{after:160} }),
+
+          // PO Info + Vendor + Delivery — 2-column table
+          new Table({
+            width:{size:10080,type:WidthType.DXA}, columnWidths:[4900,5180],
+            rows:[
+              new TableRow({ children:[
+                new TableCell({ width:{size:4900,type:WidthType.DXA}, borders:noBorders, children:[
+                  new Table({ width:{size:4900,type:WidthType.DXA}, columnWidths:[2200,2700],
+                    rows:[
+                      new TableRow({ children:[
+                        new TableCell({width:{size:4900,type:WidthType.DXA},borders:{bottom:{style:BorderStyle.SINGLE,size:2,color:'1B2D4F'}},colSpan:2,shading:{fill:'1B2D4F',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({children:[new TextRun({text:'PO DETAILS',bold:true,color:'FFFFFF',size:20,font:'Arial'})]})]}),
+                      ]}),
+                      infoRow('PO Number', poNumber||'—'),
+                      infoRow('PO Date', poDate||'—'),
+                      infoRow('Project', project?.name||'—'),
+                      infoRow('GST Rate', (poData.gstRate||18)+'%'),
+                    ]
+                  })
+                ]}),
+                new TableCell({ width:{size:5180,type:WidthType.DXA}, borders:noBorders, children:[
+                  new Table({ width:{size:5180,type:WidthType.DXA}, columnWidths:[2200,2980],
+                    rows:[
+                      new TableRow({ children:[
+                        new TableCell({width:{size:5180,type:WidthType.DXA},borders:{bottom:{style:BorderStyle.SINGLE,size:2,color:'1B2D4F'}},colSpan:2,shading:{fill:'1B2D4F',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({children:[new TextRun({text:'VENDOR DETAILS',bold:true,color:'FFFFFF',size:20,font:'Arial'})]})]}),
+                      ]}),
+                      infoRow('Vendor Name',  vendor?.name||'—', 2200, 2980),
+                      infoRow('Phone',        vendor?.phone||'—', 2200, 2980),
+                      infoRow('GSTIN',        vendor?.gstin||'—', 2200, 2980),
+                      infoRow('PAN',          vendor?.pan||'—', 2200, 2980),
+                    ]
+                  })
+                ]}),
+              ]})
+            ]
+          }),
+          new Paragraph({ spacing:{after:120} }),
+
+          // Delivery address
+          ...(deliveryAddress ? [
+            new Paragraph({ children:[new TextRun({text:'Delivery / Shipping Address:',bold:true,size:20,font:'Arial',color:'1B2D4F'})], spacing:{after:60} }),
+            new Paragraph({ children:[new TextRun({text:deliveryAddress, size:20, font:'Arial'})], spacing:{after:160} }),
+          ] : [new Paragraph({spacing:{after:160}})]),
+
+          // Items table
+          new Table({
+            width:{size:10080,type:WidthType.DXA}, columnWidths:[500,3600,800,700,1100,1380],
+            rows:[
+              new TableRow({ tableHeader:true, children:[
+                hdrCell('#',500), hdrCell('Description of Items/Work',3600),
+                hdrCell('Unit',800), hdrCell('Qty',700),
+                hdrCell('Rate (₹)',1100), hdrCell('Amount (₹)',1380),
+              ]}),
+              ...itemRows,
+              // Subtotal
+              new TableRow({ children:[
+                dataCell('',500), dataCell('',3600), dataCell('',800), dataCell('',700),
+                dataCell('Sub Total', 1100, true, true),
+                dataCell('₹'+subtotal.toLocaleString('en-IN'), 1380, true, true),
+              ]}),
+              // GST
+              new TableRow({ children:[
+                dataCell('',500), dataCell('',3600), dataCell('',800), dataCell('',700),
+                dataCell('GST @'+(poData.gstRate||18)+'%', 1100, true),
+                dataCell('₹'+gstAmt.toLocaleString('en-IN'), 1380, true),
+              ]}),
+              // Grand total
+              new TableRow({ children:[
+                new TableCell({width:{size:500},borders,children:[new Paragraph({children:[]})]}),
+                new TableCell({width:{size:3600},borders,children:[new Paragraph({children:[]})]}),
+                new TableCell({width:{size:800},borders,children:[new Paragraph({children:[]})]}),
+                new TableCell({width:{size:700},borders,children:[new Paragraph({children:[]})]}),
+                new TableCell({width:{size:1100},borders,shading:{fill:'1B2D4F',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:'GRAND TOTAL',bold:true,color:'FFFFFF',size:20,font:'Arial'})]})]}) ,
+                new TableCell({width:{size:1380},borders,shading:{fill:'C9951E',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:'₹'+grandTotal.toLocaleString('en-IN'),bold:true,color:'FFFFFF',size:22,font:'Arial'})]})]}),
+              ]}),
+            ]
+          }),
+
+          new Paragraph({ spacing:{after:200} }),
+
+          // Notes
+          ...(notes ? [
+            new Paragraph({ spacing:{after:60}, children:[new TextRun({text:'Notes / Instructions:',bold:true,size:20,font:'Arial',color:'1B2D4F'})] }),
+            new Paragraph({ spacing:{after:160}, children:[new TextRun({text:notes,size:20,font:'Arial'})] }),
+          ] : []),
+
+          // Terms
+          ...(terms ? [
+            new Paragraph({ spacing:{after:60}, children:[new TextRun({text:'Terms & Conditions:',bold:true,size:20,font:'Arial',color:'1B2D4F'})] }),
+            new Paragraph({ spacing:{after:200}, children:[new TextRun({text:terms,size:20,font:'Arial'})] }),
+          ] : []),
+
+          // Signature
+          new Table({
+            width:{size:10080,type:WidthType.DXA}, columnWidths:[5040,5040],
+            rows:[new TableRow({ children:[
+              new TableCell({width:{size:5040,type:WidthType.DXA},borders:noBorders,margins:cellM,children:[
+                new Paragraph({children:[new TextRun({text:'Prepared by:',size:18,font:'Arial',color:'6B7280'})]}),
+                new Paragraph({spacing:{after:600},children:[]}),
+                new Paragraph({border:{bottom:{style:BorderStyle.SINGLE,size:4,color:'374151'}},children:[new Paragraph({children:[]})]}),
+                new Paragraph({children:[new TextRun({text:'Signature',size:18,font:'Arial',color:'9CA3AF'})]})
+              ]}),
+              new TableCell({width:{size:5040,type:WidthType.DXA},borders:noBorders,margins:cellM,children:[
+                new Paragraph({children:[new TextRun({text:'Authorized by:',size:18,font:'Arial',color:'6B7280'})]}),
+                new Paragraph({spacing:{after:600},children:[]}),
+                new Paragraph({border:{bottom:{style:BorderStyle.SINGLE,size:4,color:'374151'}},children:[new Paragraph({children:[]})]}),
+                new Paragraph({children:[new TextRun({text:'Signature',size:18,font:'Arial',color:'9CA3AF'})]})
+              ]}),
+            ]})]
+          }),
+        ]
+      }]
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+    const dir  = path.join(getDataDir(), 'documents', 'purchase_orders');
+    fs.mkdirSync(dir, { recursive:true });
+    const filename = `PO_${(poNumber||'').replace(/\//g,'_')}_${Date.now()}.docx`;
+    const filePath = path.join(dir, filename);
+    fs.writeFileSync(filePath, buffer);
+    shell.openPath(filePath); // Open in Word automatically
+    return { ok:true, filePath };
+  } catch(err) {
+    console.error('[VG ERP] PO generation error:', err.message);
+    return { ok:false, error:err.message };
+  }
+});
