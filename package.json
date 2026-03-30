@@ -1,7 +1,7 @@
 {
   "name": "vg-erp",
-  "version": "4.0.0",
-  "description": "Vision Grroup Real Estate ERP",
+  "version": "5.0.0",
+  "description": "Vision Grroup Real Estate ERP v5.0",
   "main": "main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
@@ -20,25 +20,12 @@
       "assets/**/*"
     ],
     "extraResources": [
-      {
-        "from": "assets/",
-        "to": "assets/"
-      }
+      { "from": "assets/", "to": "assets/" }
     ],
     "win": {
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
-        }
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
       ],
       "icon": "assets/icon.ico"
     },
@@ -49,9 +36,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Vision Grroup ERP"
     },
-    "directories": {
-      "output": "release"
-    }
+    "directories": { "output": "release" }
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -60,6 +45,7 @@
     "docx": "^9.5.3",
     "nodemailer": "^6.9.9",
     "pdfkit": "^0.15.0",
+    "tesseract.js": "^5.0.4",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

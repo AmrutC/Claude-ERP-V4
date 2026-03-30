@@ -1,34 +1,44 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('vgERP', {
-
-  // ── CONFIG / SYNC FOLDER ─────────────────────────────────────────────
-  setSyncFolder:   ()     => ipcRenderer.invoke('config:setSyncFolder'),
-  getSyncFolder:   ()     => ipcRenderer.invoke('config:getSyncFolder'),
-  setOneDrivePath: ()     => ipcRenderer.invoke('config:setSyncFolder'),
-  getOneDrivePath: ()     => ipcRenderer.invoke('config:getSyncFolder'),
-
-  // ── FILE OPERATIONS ──────────────────────────────────────────────────
-  saveFile:        (opts) => ipcRenderer.invoke('file:save', opts),
-  saveDocument:    (opts) => ipcRenderer.invoke('file:saveDocument', opts),
-
-  // ── APP ──────────────────────────────────────────────────────────────
-  getVersion:      ()     => ipcRenderer.invoke('app:version'),
-  openFolder:      (p)    => ipcRenderer.invoke('app:openFolder', p),
-  getDbPath:       ()     => ipcRenderer.invoke('db:path'),
-
-  // ── JSON DATA PERSISTENCE ─────────────────────────────────────────────
+  // Entity data
   data: {
-    saveGlobal: (data)           => ipcRenderer.invoke('data:saveGlobal', data),
-    loadGlobal: ()               => ipcRenderer.invoke('data:loadGlobal'),
-    save:       (code, data)     => ipcRenderer.invoke('data:save', { entityCode:code, data }),
-    load:       (code)           => ipcRenderer.invoke('data:load', code),
-    backup:     (code)           => ipcRenderer.invoke('data:backup', code),
-    info:       ()               => ipcRenderer.invoke('data:info'),
+    save:        (entityCode, data) => ipcRenderer.invoke('data:save', { entityCode, data }),
+    load:        (entityCode)       => ipcRenderer.invoke('data:load', entityCode),
+    saveGlobal:  (data)             => ipcRenderer.invoke('data:saveGlobal', data),
+    loadGlobal:  ()                 => ipcRenderer.invoke('data:loadGlobal'),
+    info:        ()                 => ipcRenderer.invoke('data:info'),
   },
-
-  // ── DOCUMENT GENERATION ──────────────────────────────────────────────
+  // App
+  getSyncFolder: () => ipcRenderer.invoke('app:getSyncFolder'),
+  setSyncFolder: () => ipcRenderer.invoke('app:setSyncFolder'),
+  openFolder:    (p) => ipcRenderer.invoke('app:openFolder', p),
+  openWhatsApp:  (phone) => ipcRenderer.invoke('app:openWhatsApp', phone),
+  // Backup
+  backup: {
+    create:  (opts)   => ipcRenderer.invoke('backup:create', opts),
+    list:    ()       => ipcRenderer.invoke('backup:list'),
+    restore: (bpath)  => ipcRenderer.invoke('backup:restore', bpath),
+  },
+  // Tally import
+  tally: {
+    readFile: () => ipcRenderer.invoke('tally:readFile'),
+  },
+  // OCR
+  ocr: {
+    readFile: () => ipcRenderer.invoke('ocr:readFile'),
+  },
+  // Photo
+  photo: {
+    save: (base64, fileName) => ipcRenderer.invoke('photo:save', { base64, fileName }),
+  },
+  // Documents
   doc: {
-    generatePO: (data) => ipcRenderer.invoke('doc:generatePO', data),
+    save: (buffer, suggestedName, type) => ipcRenderer.invoke('doc:save', { buffer, suggestedName, type }),
+  },
+  // CSV
+  csv: {
+    read:   ()                          => ipcRenderer.invoke('csv:read'),
+    export: (content, suggestedName)    => ipcRenderer.invoke('export:csv', { content, suggestedName }),
   },
 });

@@ -14,18 +14,32 @@ function getDataDir() {
   return app.getPath('userData');
 }
 
-// ── JSON DATA FILE PATH ────────────────────────────────────────────────────
-// One file per entity: vg_data_VEH.json, vg_data_VL.json, vg_data_ME.json
 function getDataFile(entityCode) {
   return path.join(getDataDir(), `vg_data_${entityCode || 'ALL'}.json`);
+}
+
+function getGlobalFile() {
+  return path.join(getDataDir(), 'vg_global.json');
+}
+
+function getBackupDir(dated) {
+  const base = path.join(getDataDir(), 'backups');
+  if (!fs.existsSync(base)) fs.mkdirSync(base, { recursive: true });
+  if (dated) {
+    const d = new Date().toISOString().split('T')[0];
+    const dir = path.join(base, d);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+  return base;
 }
 
 // ── WINDOW ─────────────────────────────────────────────────────────────────
 let mainWindow;
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1400, height: 860, minWidth: 1100, minHeight: 700,
-    title: 'Vision Grroup ERP v4.0',
+    width: 1440, height: 880, minWidth: 1200, minHeight: 720,
+    title: 'Vision Grroup ERP v5.0',
     backgroundColor: '#0D1E35', show: false,
     webPreferences: {
       nodeIntegration: false, contextIsolation: true,
@@ -44,164 +58,60 @@ function createWindow() {
   });
 }
 
-// ── JSON PERSISTENCE IPC ───────────────────────────────────────────────────
+app.whenReady().then(() => {
+  createWindow();
+  // Auto-backup on startup (daily)
+  setTimeout(async () => {
+    try {
+      const dir = getDataDir();
+      const today = new Date().toISOString().split('T')[0];
+      const backupDir = path.join(dir, 'backups', today);
+      if (!fs.existsSync(backupDir)) {
+        fs.mkdirSync(backupDir, { recursive: true });
+        const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+        for (const f of files) fs.copyFileSync(path.join(dir, f), path.join(backupDir, f));
+        console.log('[VG ERP] Auto-backup created for', today);
+      }
+    } catch (e) { console.warn('[VG ERP] Auto-backup failed:', e.message); }
+  }, 5000);
+});
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-// Save all data for an entity to a single JSON file
+// ── ENTITY DATA: SAVE / LOAD ───────────────────────────────────────────────
 ipcMain.handle('data:save', (event, { entityCode, data }) => {
   try {
     const filePath = getDataFile(entityCode);
-    // Keep a rolling backup of last save
-    if (fs.existsSync(filePath)) {
-      fs.copyFileSync(filePath, filePath + '.bak');
-    }
+    if (fs.existsSync(filePath)) fs.copyFileSync(filePath, filePath + '.bak');
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-    console.log('[VG ERP] Saved data for', entityCode, 'to', filePath);
     return { ok: true, path: filePath };
   } catch (err) {
-    console.error('[VG ERP] Save error:', err.message);
     return { ok: false, error: err.message };
   }
 });
 
-// Load all data for an entity from JSON file
 ipcMain.handle('data:load', (event, entityCode) => {
   try {
     const filePath = getDataFile(entityCode);
-    if (!fs.existsSync(filePath)) {
-      console.log('[VG ERP] No data file for', entityCode, '— starting fresh');
-      return { ok: true, data: null };
-    }
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const data = JSON.parse(raw);
-    console.log('[VG ERP] Loaded data for', entityCode, 'from', filePath);
+    if (!fs.existsSync(filePath)) return { ok: true, data: null };
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     return { ok: true, data };
   } catch (err) {
-    console.error('[VG ERP] Load error:', err.message);
-    // Try backup if main file is corrupted
     const backupPath = getDataFile(entityCode) + '.bak';
     if (fs.existsSync(backupPath)) {
-      try {
-        const raw = fs.readFileSync(backupPath, 'utf8');
-        const data = JSON.parse(raw);
-        console.log('[VG ERP] Loaded from backup for', entityCode);
-        return { ok: true, data, fromBackup: true };
-      } catch {}
+      try { return { ok: true, data: JSON.parse(fs.readFileSync(backupPath, 'utf8')), fromBackup: true }; } catch {}
     }
     return { ok: false, error: err.message };
   }
 });
 
-// Get info about data files
-ipcMain.handle('data:info', () => {
-  try {
-    const dir = getDataDir();
-    const files = fs.readdirSync(dir)
-      .filter(f => f.startsWith('vg_data_') && f.endsWith('.json'))
-      .map(f => {
-        const stat = fs.statSync(path.join(dir, f));
-        return { name: f, size: stat.size, modified: stat.mtime };
-      });
-    return { ok: true, dir, files };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-// Manual backup
-ipcMain.handle('data:backup', (event, entityCode) => {
-  try {
-    const src = getDataFile(entityCode);
-    if (!fs.existsSync(src)) return { ok: false, error: 'No data file found' };
-    const date = new Date().toISOString().slice(0,19).replace(/:/g,'-');
-    const dir  = path.join(getDataDir(), 'backups');
-    fs.mkdirSync(dir, { recursive: true });
-    const dst  = path.join(dir, `vg_data_${entityCode}_${date}.json`);
-    fs.copyFileSync(src, dst);
-    console.log('[VG ERP] Backup created:', dst);
-    return { ok: true, path: dst };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-// ── CONFIG IPC ─────────────────────────────────────────────────────────────
-ipcMain.handle('config:setSyncFolder', async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: 'Select Vision Grroup ERP Data Folder (OneDrive, local, or network)',
-    properties: ['openDirectory'],
-    buttonLabel: 'Use This Folder',
-  });
-  if (!result.canceled && result.filePaths[0]) {
-    const p = result.filePaths[0];
-    fs.writeFileSync(path.join(app.getPath('userData'), 'sync_folder.txt'), p);
-    // Create subfolders
-    ['backups','exports','documents','templates'].forEach(sub =>
-      fs.mkdirSync(path.join(p, sub), { recursive: true })
-    );
-    return { ok: true, path: p };
-  }
-  return { ok: false };
-});
-
-ipcMain.handle('config:getSyncFolder', () => {
-  const cfgPath = path.join(app.getPath('userData'), 'sync_folder.txt');
-  if (fs.existsSync(cfgPath)) return fs.readFileSync(cfgPath, 'utf8').trim();
-  return null;
-});
-
-// Keep old names working too
-ipcMain.handle('config:setOneDrivePath', async () => {
-  return ipcMain.emit('config:setSyncFolder');
-});
-ipcMain.handle('config:getOneDrivePath', () => {
-  const cfgPath = path.join(app.getPath('userData'), 'sync_folder.txt');
-  if (fs.existsSync(cfgPath)) return fs.readFileSync(cfgPath, 'utf8').trim();
-  return null;
-});
-
-// ── FILE IPC ───────────────────────────────────────────────────────────────
-ipcMain.handle('file:save', async (event, { defaultName, ext, data }) => {
-  const filters = ext==='xlsx'?[{name:'Excel',extensions:['xlsx']}]:ext==='pdf'?[{name:'PDF',extensions:['pdf']}]:[{name:'All Files',extensions:['*']}];
-  const { filePath } = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save File', defaultPath: path.join(app.getPath('documents'), defaultName), filters,
-  });
-  if (filePath) { fs.writeFileSync(filePath, Buffer.from(data)); return { ok:true, filePath }; }
-  return { ok: false };
-});
-
-ipcMain.handle('file:saveDocument', (event, { folder, filename, data }) => {
-  const dir = path.join(getDataDir(), 'documents', folder||'');
-  fs.mkdirSync(dir, { recursive: true });
-  const fp = path.join(dir, filename);
-  fs.writeFileSync(fp, Buffer.from(data));
-  return { ok: true, filePath: fp };
-});
-
-ipcMain.handle('db:backup',      () => ipcMain.emit('data:backup', null, 'ALL'));
-ipcMain.handle('app:version',    () => app.getVersion());
-ipcMain.handle('app:openFolder', (e, p) => shell.openPath(p));
-ipcMain.handle('db:path',        () => getDataDir());
-
-// ── LIFECYCLE ──────────────────────────────────────────────────────────────
-app.whenReady().then(() => {
-  createWindow();
-  app.on('activate', () => { if (BrowserWindow.getAllWindows().length===0) createWindow(); });
-});
-app.on('window-all-closed', () => { if (process.platform!=='darwin') app.quit(); });
-
-// ── GLOBAL CONFIG (entities, shared settings) ──────────────────────────────
-// Stored in vg_global.json — not per-entity
-function getGlobalFile() {
-  return path.join(getDataDir(), 'vg_global.json');
-}
-
+// ── GLOBAL DATA: SAVE / LOAD ───────────────────────────────────────────────
 ipcMain.handle('data:saveGlobal', (event, data) => {
   try {
     const filePath = getGlobalFile();
     if (fs.existsSync(filePath)) fs.copyFileSync(filePath, filePath + '.bak');
     fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
-    console.log('[VG ERP] Saved global config to', filePath);
-    return { ok: true, path: filePath };
+    return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message };
   }
@@ -211,215 +121,210 @@ ipcMain.handle('data:loadGlobal', () => {
   try {
     const filePath = getGlobalFile();
     if (!fs.existsSync(filePath)) return { ok: true, data: null };
-    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    console.log('[VG ERP] Loaded global config from', filePath);
-    return { ok: true, data };
+    return { ok: true, data: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
   } catch (err) {
-    const bak = getGlobalFile() + '.bak';
-    if (fs.existsSync(bak)) {
-      try { return { ok: true, data: JSON.parse(fs.readFileSync(bak, 'utf8')), fromBackup: true }; } catch {}
-    }
     return { ok: false, error: err.message };
   }
 });
 
-// ── PURCHASE ORDER — Word file generation ─────────────────────────────────
-ipcMain.handle('doc:generatePO', async (event, poData) => {
+// ── DATA INFO ──────────────────────────────────────────────────────────────
+ipcMain.handle('data:info', () => {
   try {
-    // Dynamic import of docx (must be installed: npm install docx)
-    let docxLib;
-    try { docxLib = require('docx'); }
-    catch { return { ok:false, error:'docx package not installed. Run: npm install docx' }; }
-
-    const {
-      Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,
-      AlignmentType, WidthType, BorderStyle, ShadingType, VerticalAlign,
-    } = docxLib;
-
-    const { vendor, project, items, poNumber, poDate, deliveryAddress, notes, terms, entityName } = poData;
-
-    const border = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' };
-    const borders = { top:border, bottom:border, left:border, right:border };
-    const noBorder = { style: BorderStyle.NONE };
-    const noBorders = { top:noBorder, bottom:noBorder, left:noBorder, right:noBorder };
-    const cellM = { top:100, bottom:100, left:120, right:120 };
-
-    function hdrCell(text, w, bg='1B2D4F') {
-      return new TableCell({
-        width:{size:w,type:WidthType.DXA}, borders,
-        shading:{fill:bg,type:ShadingType.CLEAR}, margins:cellM,
-        verticalAlign:VerticalAlign.CENTER,
-        children:[new Paragraph({ alignment:AlignmentType.CENTER, children:[new TextRun({text,bold:true,color:'FFFFFF',size:20,font:'Arial'})] })]
+    const dir = getDataDir();
+    const files = fs.readdirSync(dir)
+      .filter(f => f.startsWith('vg_data_') && f.endsWith('.json'))
+      .map(f => {
+        const fp = path.join(dir, f);
+        const st = fs.statSync(fp);
+        return { name: f, size: st.size, modified: st.mtime };
       });
+    return { ok: true, dir, files };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ── SYNC FOLDER ────────────────────────────────────────────────────────────
+ipcMain.handle('app:getSyncFolder', () => {
+  try {
+    const cfgPath = path.join(app.getPath('userData'), 'sync_folder.txt');
+    if (fs.existsSync(cfgPath)) {
+      const p = fs.readFileSync(cfgPath, 'utf8').trim();
+      if (p && fs.existsSync(p)) return p;
     }
-    function dataCell(text, w, right=false, bold=false) {
-      return new TableCell({
-        width:{size:w,type:WidthType.DXA}, borders, margins:cellM,
-        children:[new Paragraph({ alignment:right?AlignmentType.RIGHT:AlignmentType.LEFT, children:[new TextRun({text:String(text||''),bold,size:20,font:'Arial'})] })]
-      });
+    return null;
+  } catch { return null; }
+});
+
+ipcMain.handle('app:setSyncFolder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Sync Folder (OneDrive or Local)',
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const chosen = result.filePaths[0];
+  const cfgPath = path.join(app.getPath('userData'), 'sync_folder.txt');
+  fs.writeFileSync(cfgPath, chosen, 'utf8');
+  return chosen;
+});
+
+ipcMain.handle('app:openFolder', (event, folderPath) => {
+  shell.openPath(folderPath || getDataDir());
+});
+
+// ── BACKUP ─────────────────────────────────────────────────────────────────
+ipcMain.handle('backup:create', async (event, { label } = {}) => {
+  try {
+    const dir = getDataDir();
+    const ts = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+    const backupDir = path.join(getBackupDir(false), ts + (label ? '_' + label : ''));
+    fs.mkdirSync(backupDir, { recursive: true });
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+    let totalSize = 0;
+    for (const f of files) {
+      const src = path.join(dir, f);
+      fs.copyFileSync(src, path.join(backupDir, f));
+      totalSize += fs.statSync(src).size;
     }
-    function labelCell(text, w) {
-      return new TableCell({
-        width:{size:w,type:WidthType.DXA}, borders,
-        shading:{fill:'F0F4F8',type:ShadingType.CLEAR}, margins:cellM,
-        children:[new Paragraph({ children:[new TextRun({text,bold:true,size:20,font:'Arial',color:'374151'})] })]
-      });
+    return { ok: true, path: backupDir, fileCount: files.length, size: totalSize, ts };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('backup:list', () => {
+  try {
+    const base = path.join(getDataDir(), 'backups');
+    if (!fs.existsSync(base)) return { ok: true, backups: [] };
+    const backups = fs.readdirSync(base)
+      .filter(d => fs.statSync(path.join(base, d)).isDirectory())
+      .map(d => {
+        const dirPath = path.join(base, d);
+        const files = fs.readdirSync(dirPath);
+        const size = files.reduce((acc, f) => acc + fs.statSync(path.join(dirPath, f)).size, 0);
+        return { name: d, path: dirPath, fileCount: files.length, size, ts: d };
+      })
+      .sort((a, b) => b.name.localeCompare(a.name));
+    return { ok: true, backups };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('backup:restore', (event, backupPath) => {
+  try {
+    const dir = getDataDir();
+    const files = fs.readdirSync(backupPath).filter(f => f.endsWith('.json'));
+    for (const f of files) {
+      fs.copyFileSync(path.join(backupPath, f), path.join(dir, f));
     }
-    function infoRow(label, value, w1=2200, w2=2700) {
-      return new TableRow({ children:[labelCell(label,w1), dataCell(value,w2)] });
-    }
+    return { ok: true, fileCount: files.length };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
-    // Item rows
-    const subtotal = items.reduce((s,it)=>s+(Number(it.qty||0)*Number(it.rate||0)),0);
-    const gstAmt   = Math.round(subtotal * Number(poData.gstRate||18) / 100);
-    const grandTotal = subtotal + gstAmt;
+// ── TALLY IMPORT: READ XML FILE ────────────────────────────────────────────
+ipcMain.handle('tally:readFile', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Tally XML Export',
+    filters: [{ name: 'XML Files', extensions: ['xml'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
+  try {
+    const content = fs.readFileSync(result.filePaths[0], 'utf8');
+    return { ok: true, content, filePath: result.filePaths[0] };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
-    const itemRows = items.map((it,i)=>
-      new TableRow({ children:[
-        dataCell(String(i+1), 500, true),
-        dataCell(it.description||'', 3600),
-        dataCell(it.unit||'Nos', 800, true),
-        dataCell(String(it.qty||''), 700, true),
-        dataCell('₹'+Number(it.rate||0).toLocaleString('en-IN'), 1100, true),
-        dataCell('₹'+(Number(it.qty||0)*Number(it.rate||0)).toLocaleString('en-IN'), 1260, true, true),
-      ]})
-    );
+// ── OCR: READ IMAGE / PDF FOR TESSERACT ───────────────────────────────────
+ipcMain.handle('ocr:readFile', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select Image or PDF for OCR',
+    filters: [{ name: 'Images & PDF', extensions: ['jpg', 'jpeg', 'png', 'pdf'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
+  try {
+    const buffer = fs.readFileSync(result.filePaths[0]);
+    const base64 = buffer.toString('base64');
+    const ext = path.extname(result.filePaths[0]).toLowerCase().replace('.', '');
+    return { ok: true, base64, ext, filePath: result.filePaths[0], fileName: path.basename(result.filePaths[0]) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
 
-    const doc = new Document({
-      sections:[{
-        properties:{ page:{ size:{width:12240,height:15840}, margin:{top:900,bottom:900,left:1080,right:1080} } },
-        children:[
-          // Title
-          new Paragraph({ alignment:AlignmentType.CENTER, spacing:{after:80}, children:[
-            new TextRun({text:'PURCHASE ORDER', bold:true, size:36, font:'Arial', color:'1B2D4F'})
-          ]}),
-          new Paragraph({ alignment:AlignmentType.CENTER, spacing:{after:200}, border:{bottom:{style:BorderStyle.SINGLE,size:6,color:'C9951E',space:1}}, children:[
-            new TextRun({text:entityName||'Vision Grroup', size:22, font:'Arial', color:'6B7280'})
-          ]}),
-          new Paragraph({ spacing:{after:160} }),
-
-          // PO Info + Vendor + Delivery — 2-column table
-          new Table({
-            width:{size:10080,type:WidthType.DXA}, columnWidths:[4900,5180],
-            rows:[
-              new TableRow({ children:[
-                new TableCell({ width:{size:4900,type:WidthType.DXA}, borders:noBorders, children:[
-                  new Table({ width:{size:4900,type:WidthType.DXA}, columnWidths:[2200,2700],
-                    rows:[
-                      new TableRow({ children:[
-                        new TableCell({width:{size:4900,type:WidthType.DXA},borders:{bottom:{style:BorderStyle.SINGLE,size:2,color:'1B2D4F'}},colSpan:2,shading:{fill:'1B2D4F',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({children:[new TextRun({text:'PO DETAILS',bold:true,color:'FFFFFF',size:20,font:'Arial'})]})]}),
-                      ]}),
-                      infoRow('PO Number', poNumber||'—'),
-                      infoRow('PO Date', poDate||'—'),
-                      infoRow('Project', project?.name||'—'),
-                      infoRow('GST Rate', (poData.gstRate||18)+'%'),
-                    ]
-                  })
-                ]}),
-                new TableCell({ width:{size:5180,type:WidthType.DXA}, borders:noBorders, children:[
-                  new Table({ width:{size:5180,type:WidthType.DXA}, columnWidths:[2200,2980],
-                    rows:[
-                      new TableRow({ children:[
-                        new TableCell({width:{size:5180,type:WidthType.DXA},borders:{bottom:{style:BorderStyle.SINGLE,size:2,color:'1B2D4F'}},colSpan:2,shading:{fill:'1B2D4F',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({children:[new TextRun({text:'VENDOR DETAILS',bold:true,color:'FFFFFF',size:20,font:'Arial'})]})]}),
-                      ]}),
-                      infoRow('Vendor Name',  vendor?.name||'—', 2200, 2980),
-                      infoRow('Phone',        vendor?.phone||'—', 2200, 2980),
-                      infoRow('GSTIN',        vendor?.gstin||'—', 2200, 2980),
-                      infoRow('PAN',          vendor?.pan||'—', 2200, 2980),
-                    ]
-                  })
-                ]}),
-              ]})
-            ]
-          }),
-          new Paragraph({ spacing:{after:120} }),
-
-          // Delivery address
-          ...(deliveryAddress ? [
-            new Paragraph({ children:[new TextRun({text:'Delivery / Shipping Address:',bold:true,size:20,font:'Arial',color:'1B2D4F'})], spacing:{after:60} }),
-            new Paragraph({ children:[new TextRun({text:deliveryAddress, size:20, font:'Arial'})], spacing:{after:160} }),
-          ] : [new Paragraph({spacing:{after:160}})]),
-
-          // Items table
-          new Table({
-            width:{size:10080,type:WidthType.DXA}, columnWidths:[500,3600,800,700,1100,1380],
-            rows:[
-              new TableRow({ tableHeader:true, children:[
-                hdrCell('#',500), hdrCell('Description of Items/Work',3600),
-                hdrCell('Unit',800), hdrCell('Qty',700),
-                hdrCell('Rate (₹)',1100), hdrCell('Amount (₹)',1380),
-              ]}),
-              ...itemRows,
-              // Subtotal
-              new TableRow({ children:[
-                dataCell('',500), dataCell('',3600), dataCell('',800), dataCell('',700),
-                dataCell('Sub Total', 1100, true, true),
-                dataCell('₹'+subtotal.toLocaleString('en-IN'), 1380, true, true),
-              ]}),
-              // GST
-              new TableRow({ children:[
-                dataCell('',500), dataCell('',3600), dataCell('',800), dataCell('',700),
-                dataCell('GST @'+(poData.gstRate||18)+'%', 1100, true),
-                dataCell('₹'+gstAmt.toLocaleString('en-IN'), 1380, true),
-              ]}),
-              // Grand total
-              new TableRow({ children:[
-                new TableCell({width:{size:500},borders,children:[new Paragraph({children:[]})]}),
-                new TableCell({width:{size:3600},borders,children:[new Paragraph({children:[]})]}),
-                new TableCell({width:{size:800},borders,children:[new Paragraph({children:[]})]}),
-                new TableCell({width:{size:700},borders,children:[new Paragraph({children:[]})]}),
-                new TableCell({width:{size:1100},borders,shading:{fill:'1B2D4F',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:'GRAND TOTAL',bold:true,color:'FFFFFF',size:20,font:'Arial'})]})]}) ,
-                new TableCell({width:{size:1380},borders,shading:{fill:'C9951E',type:ShadingType.CLEAR},margins:cellM,children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:'₹'+grandTotal.toLocaleString('en-IN'),bold:true,color:'FFFFFF',size:22,font:'Arial'})]})]}),
-              ]}),
-            ]
-          }),
-
-          new Paragraph({ spacing:{after:200} }),
-
-          // Notes
-          ...(notes ? [
-            new Paragraph({ spacing:{after:60}, children:[new TextRun({text:'Notes / Instructions:',bold:true,size:20,font:'Arial',color:'1B2D4F'})] }),
-            new Paragraph({ spacing:{after:160}, children:[new TextRun({text:notes,size:20,font:'Arial'})] }),
-          ] : []),
-
-          // Terms
-          ...(terms ? [
-            new Paragraph({ spacing:{after:60}, children:[new TextRun({text:'Terms & Conditions:',bold:true,size:20,font:'Arial',color:'1B2D4F'})] }),
-            new Paragraph({ spacing:{after:200}, children:[new TextRun({text:terms,size:20,font:'Arial'})] }),
-          ] : []),
-
-          // Signature
-          new Table({
-            width:{size:10080,type:WidthType.DXA}, columnWidths:[5040,5040],
-            rows:[new TableRow({ children:[
-              new TableCell({width:{size:5040,type:WidthType.DXA},borders:noBorders,margins:cellM,children:[
-                new Paragraph({children:[new TextRun({text:'Prepared by:',size:18,font:'Arial',color:'6B7280'})]}),
-                new Paragraph({spacing:{after:600},children:[]}),
-                new Paragraph({border:{bottom:{style:BorderStyle.SINGLE,size:4,color:'374151'}},children:[new Paragraph({children:[]})]}),
-                new Paragraph({children:[new TextRun({text:'Signature',size:18,font:'Arial',color:'9CA3AF'})]})
-              ]}),
-              new TableCell({width:{size:5040,type:WidthType.DXA},borders:noBorders,margins:cellM,children:[
-                new Paragraph({children:[new TextRun({text:'Authorized by:',size:18,font:'Arial',color:'6B7280'})]}),
-                new Paragraph({spacing:{after:600},children:[]}),
-                new Paragraph({border:{bottom:{style:BorderStyle.SINGLE,size:4,color:'374151'}},children:[new Paragraph({children:[]})]}),
-                new Paragraph({children:[new TextRun({text:'Signature',size:18,font:'Arial',color:'9CA3AF'})]})
-              ]}),
-            ]})]
-          }),
-        ]
-      }]
-    });
-
-    const buffer = await Packer.toBuffer(doc);
-    const dir  = path.join(getDataDir(), 'documents', 'purchase_orders');
-    fs.mkdirSync(dir, { recursive:true });
-    const filename = `PO_${(poNumber||'').replace(/\//g,'_')}_${Date.now()}.docx`;
-    const filePath = path.join(dir, filename);
+// ── PHOTO SAVE ─────────────────────────────────────────────────────────────
+ipcMain.handle('photo:save', (event, { base64, fileName }) => {
+  try {
+    const photosDir = path.join(getDataDir(), 'photos');
+    if (!fs.existsSync(photosDir)) fs.mkdirSync(photosDir, { recursive: true });
+    const buffer = Buffer.from(base64, 'base64');
+    const filePath = path.join(photosDir, fileName);
     fs.writeFileSync(filePath, buffer);
-    shell.openPath(filePath); // Open in Word automatically
-    return { ok:true, filePath };
-  } catch(err) {
-    console.error('[VG ERP] PO generation error:', err.message);
-    return { ok:false, error:err.message };
+    return { ok: true, path: filePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ── DOCUMENT: SAVE DOCX / PDF ─────────────────────────────────────────────
+ipcMain.handle('doc:save', async (event, { buffer, suggestedName, type }) => {
+  const ext = type === 'pdf' ? 'pdf' : 'docx';
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Save Document',
+    defaultPath: suggestedName || `document.${ext}`,
+    filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+  try {
+    fs.writeFileSync(result.filePath, Buffer.from(buffer));
+    shell.openPath(result.filePath);
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ── CSV IMPORT: READ CSV ───────────────────────────────────────────────────
+ipcMain.handle('csv:read', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select CSV File',
+    filters: [{ name: 'CSV', extensions: ['csv'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
+  try {
+    const content = fs.readFileSync(result.filePaths[0], 'utf8');
+    return { ok: true, content, fileName: path.basename(result.filePaths[0]) };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// ── WHATSAPP LINK ─────────────────────────────────────────────────────────
+ipcMain.handle('app:openWhatsApp', (event, phone) => {
+  const clean = (phone || '').replace(/\D/g, '');
+  shell.openExternal(`https://wa.me/91${clean}`);
+});
+
+// ── EXPORT CSV ─────────────────────────────────────────────────────────────
+ipcMain.handle('export:csv', async (event, { content, suggestedName }) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export CSV',
+    defaultPath: suggestedName || 'export.csv',
+    filters: [{ name: 'CSV', extensions: ['csv'] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+  try {
+    fs.writeFileSync(result.filePath, content, 'utf8');
+    shell.openPath(result.filePath);
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
 });
